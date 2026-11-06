@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+import os
+import argparse
+from datetime import datetime
+from PIL import Image
+from PIL.ExifTags import TAGS, GPSTAGS
+
+ALLOWED_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".bmp")
+
+RESET = "\033[0m"
+BOLD = "\033[1m"
+GREEN = "\033[32m"
+BLUE = "\033[34m"
+CYAN = "\033[36m"
+YELLOW = "\033[33m"
+RED = "\033[31m"
+MAGENTA = "\033[35m"
+
+def get_image_metadata(image_path):
+    metadata = {
+        "Image Details": {},
+        "EXIF Data": {},
+        "GPS Info": {}
+    }
+
+    try:
+        with Image.open(image_path) as img:
+            metadata["Image Details"]["Format"] = img.format
+            metadata["Image Details"]["Mod (Color)"] = img.mode
+            metadata["Image Details"]["Çözünürlük"] = f"{img.width} x {img.height} piksel"
+            if hasattr(img, "is_animated"):
+                metadata["Image Details"]["Animasyon"] = "Evet" if img.is_animated else "Hayır"
+                metadata["Image Details"]["Kare Sayısı"] = getattr(img, "n_frames", 1)
+
+            exif_data = img.getexif()
+            if exif_data:
+                for tag_id, value in exif_data.get_ifd(0x8769).items():
+                    metadata["EXIF Data"][TAGS.get(tag_id, f"Tag_{tag_id}")] = str(value)
+
+                for tag_id, value in exif_data.items():
+                    tag_name = TAGS.get(tag_id, f"Tag_{tag_id}")
+                    
+                    if tag_name == "GPSInfo" or tag_id == 34853:
+                        try:
+                            gps_ifd = exif_data.get_ifd(34853)
+                            for gps_id, gps_value in gps_ifd.items():
+                                gps_name = GPSTAGS.get(gps_id, f"GPS_{gps_id}")
+                                metadata["GPS Info"][gps_name] = str(gps_value)
+                        except Exception as e:
+                            metadata["GPS Info"]["Raw GPS"] = str(value)
+                    else:
+                        if isinstance(value, bytes):
+                            try:
+                                value = value.decode("utf-8", errors="ignore").strip()
+                            except Exception:
+                                value = f"<{len(value)} bytes>"
+                        metadata["EXIF Data"][tag_name] = str(value)
+
+            if hasattr(img, "info") and img.info:
+                for k, v in img.info.items():
+                    if k not in ("exif", "icc_profile") and not isinstance(v, (bytes, bytearray)):
+                        metadata["EXIF Data"][k] = str(v)
+
+    except Exception as e:
+        metadata["Error"] = f"[!] Hata: {image_path} dosyasının EXIF verileri alınamadı. {e}"
+    
+    return metadata
+
+def get_basic_attributes(file_path):
+    try:
+        stats = os.stat(file_path)
+        return {
+            "Dosya Adı": os.path.basename(file_path),
+            "Tam Yol": os.path.abspath(file_path),
+            "Boyut": f"{stats.st_size / 1024:.2f} KB ({stats.st_size} bytes)",
+            "Oluşturulma Tarihi": datetime.fromtimestamp(stats.st_ctime).strftime("%Y-%m-%d %H:%M:%S"),
+            "Son Değiştirilme Tarihi": datetime.fromtimestamp(stats.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    except Exception as e:
+        print(f"{RED}[!] Hata: {file_path} dosyasının öznitelikleri alınamadı. {e}{RESET}")
+        return None
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Scorpion - Görsel Metadata ve EXIF Analiz Aracı", usage="./scorpion FILE1 [FILE2 ...]")
+    parser.add_argument("files", nargs="+", help="Analiz edilecek dosya(lar)")
+    return parser.parse_args()
+
+def print_section(title, data_dict, color):
+    if not data_dict:
+        return
+    print(f"\n {color}{BOLD}[{title}]{RESET}")
+    for key, val in data_dict.items():
+        # Çok uzun metadata değerlerini (açıklamalar vb.) tek satırda ezmemesi için kırpıyoruz
+        str_val = str(val)
+        if len(str_val) > 75:
+            str_val = str_val[:72] + "..."
+        print(f"   • {key:<28}: {str_val}")
+
+def main():
+    args = parse_arguments()
+
+    print(f"\n{BOLD}{MAGENTA}╔════════════════════════════════════════════════════════╗{RESET}")
+    print(f"{BOLD}{MAGENTA}║                   SCORPION PARSER                      ║{RESET}")
+    print(f"{BOLD}{MAGENTA}╚════════════════════════════════════════════════════════╝{RESET}")
+
+    for file_path in args.files:
+        print(f"\n{BOLD}{CYAN}══════════════════════════════════════════════════════════{RESET}")
+        print(f"{BOLD}{CYAN} DOSYA: {file_path}{RESET}")
+        print(f"{BOLD}{CYAN}══════════════════════════════════════════════════════════{RESET}")
+
+        if not os.path.exists(file_path):
+            print(f"{RED}[Hata] Dosya bulunamadı:{RESET} {file_path}")
+            continue
+
+        if not file_path.lower().endswith(ALLOWED_EXTENSIONS):
+            print(f"{YELLOW}[Uyarı] Desteklenmeyen uzantı:{RESET} {file_path}")
+            continue
+
+        # 1. İşletim sistemi öznitelikleri (Boyut, ctime, mtime)
+        basic_attrs = get_basic_attributes(file_path)
+        print_section("Temel Dosya Özellikleri", basic_attrs, BLUE)
+
+        # 2. Pillow ile EXIF ve Resim Metadata'sı
+        meta = get_image_metadata(file_path)
+
+        if "Error" in meta:
+            print(f" {RED}[!] {meta['Error']}{RESET}")
+            continue
+
+        print_section("Görsel Biçim Bilgileri", meta["Image Details"], GREEN)
+
+        if meta["EXIF Data"]:
+            print_section("EXIF / Metadata Bilgileri", meta["EXIF Data"], YELLOW)
+        else:
+            print(f"\n {YELLOW}[!] Bu dosyada gömülü EXIF/Metadata etiketi bulunamadı.{RESET}")
+
+        if meta["GPS Info"]:
+            print_section("GPS Coğrafi Konum Verileri", meta["GPS Info"], MAGENTA)
+
+    print(f"\n{CYAN}──────────────────────────────────────────────────────────{RESET}\n")
+if __name__ == "__main__":
+    main()

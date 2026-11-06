@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+import argparse
+import sys
+import os
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse, unquote
+from collections import deque
+
+RESET = "\033[0m"
+BOLD = "\033[1m"
+GREEN = "\033[32m"
+BLUE = "\033[34m"
+CYAN = "\033[36m"
+YELLOW = "\033[33m"
+RED = "\033[31m"
+MAGENTA = "\033[35m"
+
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp"}
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.3"
+}
+
+def download_imgs(img_url, save_dir):
+    try:
+        os.makedirs(save_dir, exist_ok=True)
+
+        parsed_url = urlparse(img_url)
+        filename = os.path.basename(unquote(parsed_url.path))
+
+        if not filename or not any(filename.lower().endswith(ext) for ext in ALLOWED_EXTENSIONS):
+            filename = "downloaded_image.jpg"
+
+        base_name, ext = os.path.splitext(filename)
+        save_path = os.path.join(save_dir, filename)
+        counter = 1
+        while os.path.exists(save_path):
+            save_path = os.path.join(save_dir, f"{base_name}_{counter}{ext}")
+            counter += 1
+
+        response = requests.get(img_url, headers=HEADERS, stream=True, timeout=10)
+        if response.status_code == 200:
+            with open(save_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            print(f"Görsel indirildi: {save_path}")
+            return True
+        else:
+            print(f"Hata: {img_url} adresine erişilemedi. HTTP Status Code: {response.status_code}")
+            return False
+    
+    except requests.exceptions.RequestException as e:
+        print(f"Hata: {img_url} adresine erişilemedi. {e}")
+        return False
+
+def parse_page(url, base_domain):
+    images = set()
+    links = set()
+
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        content_type = response.headers.get("Content-Type", "")
+
+        if response.status_code != 200 or "text/html" not in content_type:
+            print(f"Hata: {url} adresine erişilemedi veya HTML içeriği değil. HTTP Status Code: {response.status_code}")
+            return images, links
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        for img in soup.find_all("img", src=True):
+            img_url = urljoin(url, img["src"])
+            path_lower = urlparse(img_url).path.lower()
+            if path_lower.endswith(tuple(ALLOWED_EXTENSIONS)):
+                images.add(img_url)
+
+        for a in soup.find_all("a", href=True):
+            href = a["href"].split("#")[0].strip()
+            if not href:
+                continue
+
+            full_url = urljoin(url, href)
+            parsed_link = urlparse(full_url)
+
+            if parsed_link.scheme in {"http", "https"} and parsed_link.netloc == base_domain:
+                links.add(full_url)
+
+    except requests.exceptions.RequestException as e:
+        print(f"Hata: {url} adresine erişilemedi. Hata: {e}")
+
+    return images, links
+
+def crawl(start_url, max_depth, is_recursive, save_dir):
+    base_domain = urlparse(start_url).netloc
+
+    queue = deque([(start_url, 0)])
+    visited_urls = set()
+    downloaded_imgs = set()
+
+    while queue:
+        current_url, depth = queue.popleft()
+
+        print(f"Derinlik: {depth} - Taranıyor: {current_url}")
+
+        images, links = parse_page(current_url, base_domain)
+
+        for img_url in images:
+            if img_url not in downloaded_imgs:
+                if download_imgs(img_url, save_dir):
+                    downloaded_imgs.add(img_url)
+
+        if not is_recursive or depth >= max_depth:
+            continue
+
+        for link in links:
+            if link not in visited_urls:
+                visited_urls.add(link)
+                queue.append((link, depth + 1))
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Extract and download images recursively from a website")
+
+    parser.add_argument("url", type=str, help="Target URL to scrape images from")
+
+    parser.add_argument("-r", action="store_true", help="Recursively download images")
+
+    parser.add_argument( "-l",  type=int, default=5, help="Maximum depth level of recursive download (default is 5)")
+
+    parser.add_argument("-p", type=str, default="./data/", help="Directory path where files will be saved (default is ./data/)")
+
+    return parser.parse_args()
+
+def main():
+    args = parse_arguments()
+
+    parsed = urlparse(args.url)
+    if not parsed.scheme or not parsed.netloc:
+        print(f"\n{RED}[Hata]{RESET} Geçersiz URL: '{args.url}'. Lütfen şemayı belirtin (Örn: https://example.com)\n")
+        sys.exit(1)
+
+    print(f"\n{BOLD}{CYAN}╔════════════════════════════════════════════════════════╗{RESET}")
+    print(f"{BOLD}{CYAN}║                    SPIDER CRAWLER                      ║{RESET}")
+    print(f"{BOLD}{CYAN}╚════════════════════════════════════════════════════════╝{RESET}")
+    print(f" {BOLD}Hedef URL    :{RESET} {GREEN}{args.url}{RESET}")
+    print(f" {BOLD}Recursive    :{RESET} {MAGENTA}{'Aktif' if args.r else 'Kapalı'}{RESET}")
+    print(f" {BOLD}Maks Derinlik:{RESET} {YELLOW}{args.l}{RESET}")
+    print(f" {BOLD}Kayıt Dizini :{RESET} {BLUE}{args.p}{RESET}")
+    print(f"{CYAN}──────────────────────────────────────────────────────────{RESET}")
+
+    try:
+        crawl(
+            start_url=args.url,
+            max_depth=args.l,
+            is_recursive=args.r,
+            save_dir=args.p
+        )
+    except KeyboardInterrupt:
+        print(f"\n\n{YELLOW}[!] İşlem kullanıcı tarafından durduruldu (Ctrl+C).{RESET}\n")
+        sys.exit(0)
+
+    saved_path = os.path.abspath(args.p)
+    file_count = len(os.listdir(saved_path)) if os.path.exists(saved_path) else 0
+
+    print(f"\n{CYAN}──────────────────────────────────────────────────────────{RESET}")
+    print(f"{BOLD}{GREEN}✓ Tarama Tamamlandı!{RESET}")
+    print(f" • Hedif Klasör       : {BLUE}{saved_path}{RESET}")
+    print(f" • Klasördeki Dosyalar: {GREEN}{file_count} adet{RESET}")
+    print(f"{CYAN}──────────────────────────────────────────────────────────{RESET}\n")
+
+if __name__ == "__main__":
+    main()
